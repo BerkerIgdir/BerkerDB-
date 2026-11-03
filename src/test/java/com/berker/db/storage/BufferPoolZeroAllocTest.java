@@ -13,9 +13,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Proves fetching, unpinning, evicting and creating pages allocate nothing. Same method as
- * {@link DiskManagerZeroAllocTest}: measure this thread's allocated bytes around a warmed-up
- * loop and require exactly 0. The loops reuse one {@link PageGuard}, as real callers will.
+ * Proves fetching (READ and WRITE), unpinning, evicting, creating and flushing pages allocate
+ * nothing. Same method as {@link DiskManagerZeroAllocTest}: measure this thread's allocated
+ * bytes around a warmed-up loop and require exactly 0. The loops reuse one {@link PageGuard},
+ * as real callers will.
+ *
+ * <p>Single-threaded, so page latches are never contended here. A thread that has to wait for
+ * a latch makes StampedLock allocate a queue node; that case is not (and can't be) zero.
  */
 @Tag("zero-alloc")
 class BufferPoolZeroAllocTest {
@@ -86,15 +90,52 @@ class BufferPoolZeroAllocTest {
         }
     }
 
-    /** Fetches pages round-robin; every other access writes, so evictions also write back. */
+    /**
+     * Fetches pages round-robin, alternating WRITE (change + markDirty) and READ, so both latch
+     * modes are measured and evictions also write back.
+     */
     private void fetchLoop(int iterations, int pages) {
         for (int i = 0; i < iterations; i++) {
-            pool.fetchPage(0, i % pages, guard);
-            try (guard) {
-                if ((i & 1) == 0) {
+            if ((i & 1) == 0) {
+                pool.fetchPage(0, i % pages, LatchMode.WRITE, guard);
+                try (guard) {
                     guard.segment().set(ValueLayout.JAVA_INT, 0, i);
                     guard.markDirty();
                 }
+            } else {
+                pool.fetchPage(0, i % pages, LatchMode.READ, guard);
+                try (guard) {
+                    sink += guard.segment().get(ValueLayout.JAVA_INT, 0);
+                }
+            }
+        }
+    }
+
+    /** Keeps the JIT from dropping the reads as unused. */
+    private int sink;
+
+    @Test
+    void flushAllAllocatesNothing() {
+        createPages(FRAMES);
+        fetchLoop(WARMUP, FRAMES);
+        for (int i = 0; i < 2_000; i++) {
+            dirtyAll();
+            pool.flushAll();
+        }
+        long before = THREADS.getCurrentThreadAllocatedBytes();
+        for (int i = 0; i < 2_000; i++) {
+            dirtyAll();
+            pool.flushAll();
+        }
+        long allocated = THREADS.getCurrentThreadAllocatedBytes() - before;
+        assertEquals(0, allocated, "bytes allocated by 2000 flushAll calls over " + FRAMES + " dirty pages");
+    }
+
+    private void dirtyAll() {
+        for (int p = 0; p < FRAMES; p++) {
+            pool.fetchPage(0, p, LatchMode.WRITE, guard);
+            try (guard) {
+                guard.markDirty();
             }
         }
     }

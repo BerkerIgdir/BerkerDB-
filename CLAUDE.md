@@ -64,10 +64,20 @@ and implements each concept after reading it.
    object per frame (page key, pin count, dirty flag, slice + ByteBuffer view), all created
    at startup. Page table = `LongIntHashMap` (fixed capacity, backward-shift deletion);
    eviction = `LruReplacer` (linked list in int arrays); free frames used first.
-   Callers get pages through a reusable `PageGuard` (`fetchPage`/`newPage` fill it in,
-   `close()` unpins), so page access allocates nothing. All frames pinned ->
-   `BufferPoolFullException`. v1 threading: one global `synchronized` latch, held during
-   I/O too; page-content latches and releasing the latch during I/O come later.
+   Callers get pages through a reusable `PageGuard`: `fetchPage(fileId, pageNo, LatchMode, guard)`
+   pins and latches (READ = shared, read-only segment; WRITE = exclusive, `markDirty` allowed);
+   `newPage` always gives WRITE; `close()` releases the latch, then unpins. Page access
+   allocates nothing. All frames pinned -> `BufferPoolFullException`.
+   Two latch kinds: the global pool latch (`synchronized`) guards bookkeeping and is still held
+   during miss I/O; a per-frame `StampedLock` page latch guards page bytes. Rule: never wait for
+   a page latch while holding the pool latch (order: flushLock -> page latch -> pool latch).
+   Pin count is an `AtomicInteger`: pins happen under the pool latch; unpins are lock-free and
+   only the last one (count -> 0) takes the pool latch, re-checking the count and that the frame
+   isn't empty before adding it to the replacer. The dirty flag is volatile, set before unpinning.
+   StampedLock isn't reentrant: re-fetching a page the thread holds with WRITE throws; READ then
+   WRITE on the same page by one thread deadlocks (undetected). Flushing takes the READ latch and
+   must be called with no guards held. Page latches are short (one physical change); keeping
+   transactions apart (locks/MVCC) is a later layer. Releasing the pool latch during I/O comes later.
    Components are created at startup and passed via constructors, never singletons.
 3. `SlottedPage` - flyweight over a page; insert, read, delete, free space, compact.
 4. `Schema` / `TupleLayout` - column definitions and precomputed offsets (cold path).
