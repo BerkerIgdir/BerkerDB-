@@ -37,17 +37,26 @@ and implements each concept after reading it.
   into a `long` key (fileId high 32 bits, pageNo low 32 bits).
 - fileIds are assigned by the catalog and must stay stable across restarts (the WAL
   will reference them). A dropped table's fileId is never reused.
-- Slotted pages:
-  - Header: slot count, free-space start, free-space end, flags, reserved space for an LSN.
-  - Slot array grows forward from the header; each slot = offset (2 bytes) + length (2 bytes).
-  - Tuples grow backward from the end of the page; free space is one contiguous gap.
-  - Delete marks the slot empty; compaction is lazy and only changes slot offsets.
-- Records never span pages. Enforce a max tuple size (overflow/TOAST-like mechanism later).
+- Slotted pages (book design, Silberschatz 13.2.2). All values little-endian.
+  - Header, 24 bytes: pageLSN (8, reserved for the WAL), slotCount (u16), freeEnd (u16),
+    flags (u16), 10 reserved bytes. freeStart isn't stored: it's `24 + 4 * slotCount`.
+  - Slot array grows forward from the header; each slot = offset (u16) + length (u16).
+    A deleted slot has length 0xFFFF (the book's size -1).
+  - Tuples grow backward from the end of the page, each starting at a multiple of 8
+    (occupying its length rounded up to 8); free space is always one contiguous gap.
+  - Delete compacts immediately: tuples stored below the deleted one slide up, and their
+    slots get the new offsets (compare offsets, not slot numbers). Freed bytes are zeroed.
+    Slot numbers never change, so RIDs stay valid; never keep a tuple offset across a latch release.
+  - Insert reuses the first deleted slot (revisit once indexes hold RIDs). It returns -1 when
+    the tuple doesn't fit; lengths outside 1..8160 throw.
+- Records never span pages. Max tuple size 8160 (an empty page; overflow/TOAST-like mechanism later).
 - Record ID = (page number, slot number) packed into one `long`. It has no fileId:
   the table that owns the record already knows its file. Keep RID and page-key
   packing helpers separate so the two `long` layouts are never mixed up.
-- Tuple format: null bitmap, fixed-length columns at precomputed offsets, then
-  variable-length columns located via an offset table inside the tuple.
+- Tuple format (book order, 13.2.1): an (offset, length) pair per variable-length column,
+  fixed-length columns at precomputed offsets (stored largest first, so they're aligned),
+  the null bitmap, then the variable-length bytes. A NULL fixed column keeps its bytes.
+  No per-tuple header yet (MVCC will add one).
 
 ## Components (build order)
 
@@ -79,7 +88,8 @@ and implements each concept after reading it.
    must be called with no guards held. Page latches are short (one physical change); keeping
    transactions apart (locks/MVCC) is a later layer. Releasing the pool latch during I/O comes later.
    Components are created at startup and passed via constructors, never singletons.
-3. `SlottedPage` - flyweight over a page; insert, read, delete, free space, compact.
+3. `SlottedPage` - flyweight over a page (`wrap`, `init`); insert, read (`tupleOffset`/`tupleLength`),
+   delete with immediate compaction, `freeSpace`. No latching: the caller holds a `PageGuard`.
 4. `Schema` / `TupleLayout` - column definitions and precomputed offsets (cold path).
 5. `TupleView` - flyweight over one tuple's (offset, length) range.
 6. `TableHeap` - insert into a page with space, full table scan, reusing flyweights.
@@ -87,5 +97,7 @@ and implements each concept after reading it.
 ## Testing
 
 - Unit tests per class for correctness.
-- Hot-path tests also run under Epsilon GC (`-XX:+UseEpsilonGC`) to prove zero allocation.
+- Hot-path tests also run under Epsilon GC (`-XX:+UseEpsilonGC`) to prove zero allocation,
+  with `-Xbatch` (synchronous JIT) and a warmup that repeats the measured call, so the
+  steady state is measured, not the JIT transitions.
 - JMH for any performance measurement; no hand-rolled timing loops.

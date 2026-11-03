@@ -59,6 +59,14 @@
                         that never frees memory. No GC can run, so no allocation can be hidden
                         by a collection; the tests themselves assert an exact allocated-bytes delta of 0.
                         The heap must be big enough for JUnit + Surefire, which do allocate.
+
+                        -Xbatch makes JIT compilation synchronous. Normally the JIT compiles in
+                        background threads while the code keeps running interpreted, so whether a
+                        warmup loop has really produced compiled code by the time the measurement
+                        starts depends on timing. Interpreted and C1 code can allocate where C2
+                        code doesn't (escape analysis), so slow runs failed with a few hundred
+                        bytes. With -Xbatch the warmup reliably ends in compiled code. The
+                        compiled code itself is the same as without it.
                     -->
                     <execution>
                         <id>zero-alloc-test</id>
@@ -68,7 +76,7 @@
                         </goals>
                         <configuration>
                             <groups>zero-alloc</groups>
-                            <argLine>-XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC -Xms256m -Xmx256m</argLine>
+                            <argLine>-XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC -Xbatch -Xms256m -Xmx256m</argLine>
                         </configuration>
                     </execution>
                 </executions>
