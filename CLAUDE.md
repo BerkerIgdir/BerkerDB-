@@ -53,10 +53,15 @@ and implements each concept after reading it.
 - Record ID = (page number, slot number) packed into one `long`. It has no fileId:
   the table that owns the record already knows its file. Keep RID and page-key
   packing helpers separate so the two `long` layouts are never mixed up.
-- Tuple format (book order, 13.2.1): an (offset, length) pair per variable-length column,
-  fixed-length columns at precomputed offsets (stored largest first, so they're aligned),
-  the null bitmap, then the variable-length bytes. A NULL fixed column keeps its bytes.
-  No per-tuple header yet (MVCC will add one).
+- Tuple format (book order, 13.2.1): an (offset, length) pair per variable-length column
+  (two u16s; offset relative to the tuple's start), padding up to the largest fixed column's
+  size, fixed-length columns at precomputed offsets (stored largest first, ties in declared
+  order, so they're aligned), the null bitmap (one bit per column, nullable or not), then the
+  variable-length bytes. A NULL fixed column keeps its bytes. No per-tuple header yet (MVCC
+  will add one).
+- Types: BOOLEAN, INT, BIGINT, DOUBLE, VARCHAR(n), with n in bytes (UTF-8, never decoded).
+  Only the fixed part must fit on a page: VARCHAR limits may add up to more, and a row that
+  really is too long is refused at insert.
 
 ## Components (build order)
 
@@ -90,7 +95,9 @@ and implements each concept after reading it.
    Components are created at startup and passed via constructors, never singletons.
 3. `SlottedPage` - flyweight over a page (`wrap`, `init`); insert, read (`tupleOffset`/`tupleLength`),
    delete with immediate compaction, `freeSpace`. No latching: the caller holds a `PageGuard`.
-4. `Schema` / `TupleLayout` - column definitions and precomputed offsets (cold path).
+4. `Schema` / `TupleLayout` - column definitions (`Column`, `ColumnType`) in declared order, and
+   offsets computed once into primitive arrays, addressed by declared column index. Built on the
+   cold path; `TupleLayout`'s accessors are read per column and allocate nothing.
 5. `TupleView` - flyweight over one tuple's (offset, length) range.
 6. `TableHeap` - insert into a page with space, full table scan, reusing flyweights.
 
