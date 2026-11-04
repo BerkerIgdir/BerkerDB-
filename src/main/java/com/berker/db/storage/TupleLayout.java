@@ -1,5 +1,7 @@
 package com.berker.db.storage;
 
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -43,9 +45,17 @@ public final class TupleLayout {
 
     public static final int VAR_PAIR_SIZE = 4;
 
+    // Little-endian and unaligned, for the same reasons as in SlottedPage. Shared by the classes
+    // that read and write tuples, so they can't disagree about the format.
+    static final ValueLayout.OfShort U16 = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+    static final ValueLayout.OfInt I32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+    static final ValueLayout.OfLong I64 = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+    static final ValueLayout.OfDouble F64 = ValueLayout.JAVA_DOUBLE_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+
     private final Schema schema;
     private final int[] offsets;
-    private final boolean[] variable;
+    private final ColumnType[] types;
+    private final boolean[] nullable;
     private final int nullBitmapOffset;
     private final int nullBitmapSize;
     private final int varDataOffset;
@@ -54,13 +64,15 @@ public final class TupleLayout {
         this.schema = schema;
         int count = schema.columnCount();
         offsets = new int[count];
-        variable = new boolean[count];
+        types = new ColumnType[count];
+        nullable = new boolean[count];
 
         int pos = 0;
         List<Integer> fixed = new ArrayList<>();
         for (int i = 0; i < count; i++) {
-            variable[i] = schema.column(i).type().isVariable();
-            if (variable[i]) {
+            types[i] = schema.column(i).type();
+            nullable[i] = schema.column(i).nullable();
+            if (types[i].isVariable()) {
                 offsets[i] = pos;
                 pos += VAR_PAIR_SIZE;
             } else {
@@ -96,8 +108,16 @@ public final class TupleLayout {
         return offsets.length;
     }
 
+    public ColumnType columnType(int column) {
+        return types[column];
+    }
+
     public boolean isVariable(int column) {
-        return variable[column];
+        return types[column].isVariable();
+    }
+
+    public boolean isNullable(int column) {
+        return nullable[column];
     }
 
     /**

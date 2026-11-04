@@ -11,6 +11,10 @@ and implements each concept after reading it.
 - Point out decisions the book leaves open (byte layouts, error cases, etc.).
 - Build bottom-up, one layer at a time, with tests for each layer before moving up.
 - Prefer small, reviewable changes.
+- Write all explanations in ASD-STE100 Simplified Technical English: approved words with one
+  meaning each, active voice, short sentences (procedural up to 20 words, descriptive up to 25),
+  one instruction per sentence, and one topic per paragraph. Technical names (class names,
+  database terms) are allowed. Terms must stay the same throughout.
 
 ## Tech stack
 
@@ -98,8 +102,16 @@ and implements each concept after reading it.
 4. `Schema` / `TupleLayout` - column definitions (`Column`, `ColumnType`) in declared order, and
    offsets computed once into primitive arrays, addressed by declared column index. Built on the
    cold path; `TupleLayout`'s accessors are read per column and allocate nothing.
-5. `TupleView` - flyweight over one tuple's (offset, length) range.
-6. `TableHeap` - insert into a page with space, full table scan, reusing flyweights.
+5. `TupleView` - flyweight over one tuple's (offset, length) range: typed getters by declared
+   column index, `isNull`, and `compareVarchar` (unsigned bytes, no decoding). `TupleWriter` is
+   its opposite: builds a row in a reusable buffer; columns start NULL, set in any order.
+6. `TableHeap` - shared by threads; insert, `read` and `delete` by RID (`Rids`). Per-worker
+   objects live in a `HeapContext` passed to each call. Free-space map as in the book: one byte
+   per page (free bytes / 32, rounded down), searched from the last page used; not stored,
+   rebuilt by reading every page on open. Its lock comes after the page latch.
+   Rows are copied out, so no latch is held while the caller works on a row: `read` copies the
+   row, and `TableScan` copies each page into its own 8 KB buffer (one fetch per page). No
+   transactions yet, and no update in place.
 
 ## Testing
 

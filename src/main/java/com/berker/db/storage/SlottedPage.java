@@ -111,6 +111,11 @@ public final class SlottedPage {
 
     // ---------------------------------------------------------------- reading
 
+    /** False for an all-zero page that {@link #init} never ran on: freeEnd is never 0 otherwise. */
+    public boolean isFormatted() {
+        return freeEnd() != 0;
+    }
+
     /** Slots in use, including deleted ones; valid slot numbers are {@code 0 .. slotCount-1}. */
     public int slotCount() {
         return u16(SLOT_COUNT);
@@ -234,7 +239,7 @@ public final class SlottedPage {
         return -1;
     }
 
-    private static int align(int length) {
+    static int align(int length) {
         return (length + ALIGNMENT - 1) & -ALIGNMENT;
     }
 
