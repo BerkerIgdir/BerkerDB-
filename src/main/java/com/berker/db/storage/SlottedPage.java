@@ -171,10 +171,7 @@ public final class SlottedPage {
         }
 
         int offset = freeEnd() - occupied;
-        MemorySegment.copy(src, srcOffset, page, offset, length);
-        for (int i = offset + length; i < offset + occupied; i++) {
-            page.set(ValueLayout.JAVA_BYTE, i, (byte) 0); // padding: keep the page deterministic
-        }
+        copyTuple(src, srcOffset, offset, length, occupied);
         if (slot == -1) {
             slot = slotCount();
             setSlotCount(slot + 1);
@@ -193,6 +190,56 @@ public final class SlottedPage {
      */
     public void delete(int slot) {
         checkLive(slot);
+        removeBytes(slot);
+        setSlot(slot, 0, DELETED);
+    }
+
+    /**
+     * Replaces the tuple in {@code slot} with {@code length} bytes from {@code src}. The slot
+     * number stays the same, so the record ID stays valid.
+     *
+     * <ul>
+     *   <li>Same size after rounding up to 8: the new bytes go over the old ones.</li>
+     *   <li>Other size: the old bytes are removed as in {@link #delete}, which closes the hole,
+     *       and the new bytes go at the start of the tuple area, as in {@link #insert}. The
+     *       tuple can use its own old space, so it fits if the gap plus its old size is enough.</li>
+     * </ul>
+     *
+     * {@code src} must not be in this page: removing the old bytes moves other tuples.
+     *
+     * @return false if the new tuple doesn't fit (the page is then unchanged); the caller must
+     *         move the row to another page
+     * @throws IllegalArgumentException if {@code length} is not between 1 and {@link #MAX_TUPLE_SIZE}
+     */
+    public boolean update(int slot, MemorySegment src, long srcOffset, int length) {
+        if (length < 1 || length > MAX_TUPLE_SIZE) {
+            throw new IllegalArgumentException("tuple length must be 1.." + MAX_TUPLE_SIZE + ": " + length);
+        }
+        checkLive(slot);
+        int oldOccupied = align(slotLength(slot));
+        int occupied = align(length);
+        if (occupied == oldOccupied) {
+            int offset = slotOffset(slot);
+            copyTuple(src, srcOffset, offset, length, occupied);
+            setSlot(slot, offset, length);
+            return true;
+        }
+        if (gap() + oldOccupied < occupied) {
+            return false;
+        }
+        removeBytes(slot);
+        int offset = freeEnd() - occupied;
+        copyTuple(src, srcOffset, offset, length, occupied);
+        setSlot(slot, offset, length);
+        setFreeEnd(offset);
+        return true;
+    }
+
+    /**
+     * Removes a live tuple's bytes and closes the hole: the tuples stored below it slide up, and
+     * their slots get the new offsets. The slot itself is left to the caller.
+     */
+    private void removeBytes(int slot) {
         int offset = slotOffset(slot);
         int occupied = align(slotLength(slot));
         int freeEnd = freeEnd();
@@ -218,8 +265,15 @@ public final class SlottedPage {
             }
         }
 
-        setSlot(slot, 0, DELETED);
         setFreeEnd(freeEnd + occupied);
+    }
+
+    /** Copies a tuple to {@code offset} and zeroes its padding, up to {@code occupied} bytes. */
+    private void copyTuple(MemorySegment src, long srcOffset, int offset, int length, int occupied) {
+        MemorySegment.copy(src, srcOffset, page, offset, length);
+        for (int i = offset + length; i < offset + occupied; i++) {
+            page.set(ValueLayout.JAVA_BYTE, i, (byte) 0); // padding: keep the page deterministic
+        }
     }
 
     // ---------------------------------------------------------------- internals

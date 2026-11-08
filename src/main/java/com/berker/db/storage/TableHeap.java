@@ -34,8 +34,8 @@ import java.util.Arrays;
  * short, and a caller that inserts during its own scan can't deadlock against itself (READ then
  * WRITE on a page, which the latch can't detect).
  *
- * <p>There are no transactions yet: a concurrent scan may or may not see a row being inserted or
- * deleted. Rows also can't be updated in place yet.
+ * <p>There are no transactions yet: a concurrent scan may or may not see a row being inserted,
+ * updated or deleted.
  */
 public final class TableHeap {
 
@@ -176,6 +176,58 @@ public final class TableHeap {
             recordFreeSpace(pageNo, page.freeSpace());
             return true;
         }
+    }
+
+    /**
+     * Replaces a row with {@code length} bytes from {@code src}.
+     *
+     * <p>If the new row fits on the row's page, it stays there, in the same slot, and the record
+     * ID doesn't change. If it doesn't fit, the row moves: the new version is inserted like a
+     * new row, then the old one is deleted, and the row gets a new record ID. The caller must
+     * then change everything that keeps the old one, such as index entries. The other solution
+     * is a forwarding pointer in the old slot, which keeps the record ID but can cost a second
+     * page fetch on every read; it isn't built.
+     *
+     * <p>The move takes two steps, and no latch is held between them. Holding the old page while
+     * fetching the new one would hold two page latches, which can deadlock against a thread that
+     * takes them in the other order. Inserting before deleting means the row is never missing;
+     * a concurrent scan may see it twice for a moment instead. There are no transactions yet.
+     *
+     * @return the row's record ID, which is a new one if the row moved, or -1 if there is no such row
+     * @throws IllegalArgumentException if {@code length} is not between 1 and
+     *         {@link SlottedPage#MAX_TUPLE_SIZE}
+     */
+    public long update(HeapContext context, long rid, MemorySegment src, long srcOffset, int length) {
+        if (length < 1 || length > SlottedPage.MAX_TUPLE_SIZE) {
+            throw new IllegalArgumentException(
+                    "row length must be 1.." + SlottedPage.MAX_TUPLE_SIZE + ": " + length);
+        }
+        int pageNo = Rids.pageNo(rid);
+        int slot = Rids.slot(rid);
+        if (pageNo < 0 || pageNo >= pageCount()) {
+            return -1;
+        }
+        PageGuard guard = context.guard;
+        pool.fetchPage(fileId, pageNo, LatchMode.WRITE, guard);
+        try (guard) {
+            SlottedPage page = context.page.wrap(guard.segment());
+            if (!hasRow(page, slot)) {
+                return -1;
+            }
+            if (page.update(slot, src, srcOffset, length)) {
+                guard.markDirty();
+                recordFreeSpace(pageNo, page.freeSpace());
+                return rid;
+            }
+        }
+
+        long newRid = insert(context, src, srcOffset, length);
+        if (!delete(context, rid)) {
+            // Another thread deleted the old row in between. The row is gone, so its new copy must go too.
+            delete(context, newRid);
+            return -1;
+        }
+        return newRid;
     }
 
     /** For {@link TableScan}: copies a whole page, holding its latch only for the copy. */

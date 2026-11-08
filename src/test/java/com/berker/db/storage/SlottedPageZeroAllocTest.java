@@ -68,13 +68,17 @@ class SlottedPageZeroAllocTest {
     private void churn(int iterations) {
         for (int i = 0; i < iterations; i++) {
             int length = 1 + (i * 37) % 300;
-            if (page.insert(tuple, 0, length) == -1 || (i & 3) == 0) {
+            int slot = page.insert(tuple, 0, length);
+            if (slot != -1 && (i & 1) == 0) {
+                page.update(slot, tuple, 0, 1 + (i * 53) % 400); // grows or shrinks; may not fit
+            }
+            if (slot == -1 || (i & 3) == 0) {
                 int count = page.slotCount();
                 for (int s = count / 2; s < count + count / 2; s++) {
-                    int slot = s % count;
-                    if (page.isLive(slot)) {
-                        sink += page.tupleLength(slot) + page.tupleOffset(slot);
-                        page.delete(slot);
+                    int victim = s % count;
+                    if (page.isLive(victim)) {
+                        sink += page.tupleLength(victim) + page.tupleOffset(victim);
+                        page.delete(victim);
                         break;
                     }
                 }

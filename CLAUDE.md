@@ -53,6 +53,9 @@ and implements each concept after reading it.
     Slot numbers never change, so RIDs stay valid; never keep a tuple offset across a latch release.
   - Insert reuses the first deleted slot (revisit once indexes hold RIDs). It returns -1 when
     the tuple doesn't fit; lengths outside 1..8160 throw.
+  - Update keeps the slot: same size (rounded to 8) is overwritten in place; another size removes
+    the old bytes as delete does and puts the new ones at freeEnd. Returns false, page unchanged,
+    if the gap plus the old size isn't enough.
 - Records never span pages. Max tuple size 8160 (an empty page; overflow/TOAST-like mechanism later).
 - Record ID = (page number, slot number) packed into one `long`. It has no fileId:
   the table that owns the record already knows its file. Keep RID and page-key
@@ -98,20 +101,24 @@ and implements each concept after reading it.
    transactions apart (locks/MVCC) is a later layer. Releasing the pool latch during I/O comes later.
    Components are created at startup and passed via constructors, never singletons.
 3. `SlottedPage` - flyweight over a page (`wrap`, `init`); insert, read (`tupleOffset`/`tupleLength`),
-   delete with immediate compaction, `freeSpace`. No latching: the caller holds a `PageGuard`.
+   update in the same slot, delete with immediate compaction, `freeSpace`. No latching: the
+   caller holds a `PageGuard`.
 4. `Schema` / `TupleLayout` - column definitions (`Column`, `ColumnType`) in declared order, and
    offsets computed once into primitive arrays, addressed by declared column index. Built on the
    cold path; `TupleLayout`'s accessors are read per column and allocate nothing.
 5. `TupleView` - flyweight over one tuple's (offset, length) range: typed getters by declared
    column index, `isNull`, and `compareVarchar` (unsigned bytes, no decoding). `TupleWriter` is
    its opposite: builds a row in a reusable buffer; columns start NULL, set in any order.
-6. `TableHeap` - shared by threads; insert, `read` and `delete` by RID (`Rids`). Per-worker
+6. `TableHeap` - shared by threads; insert, and `read`, `update` and `delete` by RID (`Rids`).
+   An update that fits on the row's page keeps the RID; otherwise the row moves (insert the new
+   version, then delete the old one, no latch held between) and `update` returns a new RID,
+   which callers such as indexes must take over. No forwarding pointers. Per-worker
    objects live in a `HeapContext` passed to each call. Free-space map as in the book: one byte
    per page (free bytes / 32, rounded down), searched from the last page used; not stored,
    rebuilt by reading every page on open. Its lock comes after the page latch.
    Rows are copied out, so no latch is held while the caller works on a row: `read` copies the
    row, and `TableScan` copies each page into its own 8 KB buffer (one fetch per page). No
-   transactions yet, and no update in place.
+   transactions yet: a concurrent scan can see a moving row twice for a moment.
 
 ## Testing
 

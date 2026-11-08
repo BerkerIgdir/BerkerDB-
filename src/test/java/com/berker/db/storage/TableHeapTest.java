@@ -171,6 +171,57 @@ class TableHeapTest {
         assertEquals(Map.of(a, 1L, c, 3L), scanAll());
     }
 
+    /** Builds a row in {@code writer} and returns its length. */
+    private int row(long id, int nameLength) {
+        writer.begin();
+        writer.setLong(ID, id);
+        writer.setVarchar(NAME, name, 0, nameLength);
+        return writer.finish();
+    }
+
+    private long update(long rid, long id, int nameLength) {
+        return heap.update(context, rid, rowBuffer, 0, row(id, nameLength));
+    }
+
+    @Test
+    void anUpdateThatFitsKeepsTheRid() {
+        long a = insert(1, 10);
+        long b = insert(2, 10);
+
+        assertEquals(a, update(a, 10, 3000));
+
+        assertEquals(10, idAt(a));
+        assertEquals(2, idAt(b));
+        assertEquals(1, heap.pageCount());
+    }
+
+    @Test
+    void anUpdateThatDoesNotFitMovesTheRowAndGivesANewRid() {
+        long a = insert(1, 4000);
+        long b = insert(2, 4000);
+
+        long moved = update(a, 10, 7000);
+
+        assertTrue(moved != a);
+        assertEquals(1, Rids.pageNo(moved));
+        assertEquals(10, idAt(moved));
+        assertEquals(-1, heap.read(context, a, readBuffer, 0), "the old version is gone");
+        assertEquals(2, idAt(b));
+        assertEquals(Map.of(b, 2L, moved, 10L), scanAll());
+    }
+
+    @Test
+    void updatesOfMissingRowsReturnMinusOne() {
+        long a = insert(1, 10);
+        heap.delete(context, a);
+
+        assertEquals(-1, update(a, 2, 10));
+        assertEquals(-1, update(Rids.pack(9, 0), 2, 10));
+        assertEquals(-1, update(Rids.pack(0, 99), 2, 10));
+        assertEquals(0, scanAll().size());
+        assertThrows(IllegalArgumentException.class, () -> heap.update(context, a, rowBuffer, 0, 0));
+    }
+
     @Test
     void ridsOfMissingRowsAreAnsweredNotThrown() {
         insert(1, 10);
@@ -291,7 +342,17 @@ class TableHeapTest {
         List<Long> rids = new ArrayList<>();
         long nextId = 0;
         for (int step = 0; step < 30_000; step++) {
-            if (rids.isEmpty() || random.nextInt(100) < 60) {
+            int action = rids.isEmpty() ? 0 : random.nextInt(100);
+            if (action >= 45 && action < 60) {
+                int index = random.nextInt(rids.size());
+                long rid = rids.get(index);
+                long id = nextId++;
+                long newRid = update(rid, id, random.nextInt(4000));
+                assertTrue(newRid != -1);
+                model.remove(rid);
+                assertEquals(null, model.put(newRid, id), "rid handed out twice");
+                rids.set(index, newRid);
+            } else if (action < 45) {
                 long id = nextId++;
                 long rid = insert(id, random.nextInt(1000));
                 assertEquals(null, model.put(rid, id), "rid handed out twice");

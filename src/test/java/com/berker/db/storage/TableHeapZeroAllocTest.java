@@ -15,8 +15,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Proves the row paths allocate nothing: writing rows, inserting, reading by record ID, deleting,
- * and a full scan that reads every column. This also covers {@link TupleLayout}'s accessors and
+ * Proves the row paths allocate nothing: writing rows, inserting, reading by record ID, updating
+ * within a page, deleting, and a full scan that reads every column. This also covers
+ * {@link TupleLayout}'s accessors and
  * {@link TupleView}, including {@code MemorySegment.mismatch} in the VARCHAR comparison. Same
  * method as the other zero-alloc tests, warmed up by repeating the measured call.
  *
@@ -115,6 +116,10 @@ class TableHeapZeroAllocTest {
             long rid = insert(i);
             int length = heap.read(context, rid, readBuffer, 0);
             sink += view.wrap(readBuffer, 0, length).getLong(ID);
+            writer.begin();
+            writer.setLong(ID, i);
+            writer.setVarchar(NAME, name, 0, (i & 1) == 0 ? 8 : NAME_LENGTH); // shrinks or stays
+            rid = heap.update(context, rid, writer.segment(), 0, writer.finish());
             heap.delete(context, rid);
         }
     }

@@ -256,13 +256,107 @@ class SlottedPageTest {
         assertArrayEquals(filled(10, 1), read(s), "the failed delete changed nothing");
     }
 
+    private boolean update(int slot, int length, int fill) {
+        return page.update(slot, tuple(length, fill), 0, length);
+    }
+
+    /** The free gap between the slot array and the tuples, before setting aside any new slot. */
+    private int gap() {
+        return freeEnd() - SlottedPage.HEADER_SIZE - SlottedPage.SLOT_SIZE * page.slotCount();
+    }
+
+    @Test
+    void anUpdateOfTheSameRoundedSizeStaysInPlace() {
+        insert(100, 0xA);
+        int b = insert(13, 0xB);
+        int offset = page.tupleOffset(b);
+        int freeEndBefore = freeEnd();
+
+        assertTrue(update(b, 10, 0xC)); // 13 and 10 both take 16 bytes
+
+        assertEquals(offset, page.tupleOffset(b));
+        assertEquals(freeEndBefore, freeEnd());
+        assertArrayEquals(filled(10, 0xC), read(b));
+        for (int i = offset + 10; i < offset + 16; i++) {
+            assertEquals(0, memory.get(ValueLayout.JAVA_BYTE, i), "padding byte " + i);
+        }
+    }
+
+    @Test
+    void aLargerUpdateMovesTheTupleWithinThePageAndKeepsTheSlot() {
+        int a = insert(100, 0xA);
+        int b = insert(40, 0xB);
+        int c = insert(60, 0xC);
+        int freeEndBefore = freeEnd();
+
+        assertTrue(update(b, 500, 0xD));
+
+        assertEquals(3, page.slotCount(), "no new slot");
+        assertEquals(freeEndBefore + 40 - 504, freeEnd(), "old 40 bytes back, new 504 used");
+        assertEquals(freeEnd(), page.tupleOffset(b), "the new version is the lowest tuple");
+        assertArrayEquals(filled(100, 0xA), read(a));
+        assertArrayEquals(filled(500, 0xD), read(b));
+        assertArrayEquals(filled(60, 0xC), read(c));
+    }
+
+    @Test
+    void aSmallerUpdateGivesSpaceBack() {
+        insert(100, 0xA);
+        int b = insert(1000, 0xB);
+        int free = page.freeSpace();
+
+        assertTrue(update(b, 200, 0xC));
+
+        assertEquals(free + 800, page.freeSpace());
+        assertArrayEquals(filled(200, 0xC), read(b));
+    }
+
+    @Test
+    void anUpdateCanUseTheTuplesOwnOldSpace() {
+        int a = insert(4000, 0xA);
+        int b = insert(4000, 0xB);
+        int largest = 4000 + gap(); // more than freeSpace(): the old 4000 bytes come back first
+
+        assertTrue(largest > page.freeSpace());
+        assertTrue(update(b, largest, 0xC));
+
+        assertEquals(0, gap());
+        assertArrayEquals(filled(largest, 0xC), read(b));
+        assertArrayEquals(filled(4000, 0xA), read(a));
+    }
+
+    @Test
+    void anUpdateThatDoesNotFitChangesNothing() {
+        int a = insert(4000, 0xA);
+        insert(4000, 0xB);
+        byte[] before = memory.toArray(ValueLayout.JAVA_BYTE);
+
+        assertFalse(update(a, 4000 + gap() + 1, 0xC));
+
+        assertArrayEquals(before, memory.toArray(ValueLayout.JAVA_BYTE));
+    }
+
+    @Test
+    void updatesOfDeletedOrMissingSlotsAndBadLengthsAreRefused() {
+        int s = insert(10, 1);
+        int d = insert(10, 2);
+        page.delete(d);
+
+        assertThrows(IllegalStateException.class, () -> update(d, 10, 3));
+        assertThrows(IndexOutOfBoundsException.class, () -> update(5, 10, 3));
+        assertThrows(IllegalArgumentException.class, () -> page.update(s, tuple(1, 3), 0, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> page.update(s, tuple(1, 3), 0, SlottedPage.MAX_TUPLE_SIZE + 1));
+        assertArrayEquals(filled(10, 1), read(s));
+    }
+
     @Test
     void wrapRejectsSegmentsThatAreNotAPage() {
         assertThrows(IllegalArgumentException.class, () -> new SlottedPage().wrap(arena.allocate(100)));
     }
 
     /**
-     * Random inserts and deletes against a plain map from slot to contents. After every step:
+     * Random inserts, updates and deletes against a plain map from slot to contents. After every step:
      * each live tuple reads back intact, tuples don't overlap, are aligned, sit between freeEnd
      * and the page end, and fill that area exactly (so free space really is one gap).
      */
@@ -271,8 +365,20 @@ class SlottedPageTest {
         Random random = new Random(42);
         Map<Integer, byte[]> model = new HashMap<>();
         for (int step = 0; step < 20_000; step++) {
-            boolean doInsert = model.isEmpty() || random.nextInt(100) < 55;
-            if (doInsert) {
+            int action = model.isEmpty() ? 0 : random.nextInt(100);
+            if (action >= 40 && action < 60) {
+                List<Integer> live = new ArrayList<>(model.keySet());
+                int slot = live.get(random.nextInt(live.size()));
+                int length = 1 + random.nextInt(random.nextBoolean() ? 64 : 1500);
+                byte[] data = new byte[length];
+                random.nextBytes(data);
+                boolean fits = ((length + 7) & -8) <= gap() + ((page.tupleLength(slot) + 7) & -8);
+                boolean updated = page.update(slot, MemorySegment.ofArray(data), 0, length);
+                assertEquals(fits, updated, "update fit, step " + step);
+                if (updated) {
+                    model.put(slot, data);
+                }
+            } else if (action < 55) {
                 int length = 1 + random.nextInt(random.nextBoolean() ? 64 : 1500);
                 byte[] data = new byte[length];
                 random.nextBytes(data);
